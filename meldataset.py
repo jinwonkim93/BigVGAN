@@ -16,10 +16,90 @@ import pathlib
 from tqdm import tqdm
 from typing import List, Tuple, Optional
 from env import AttrDict
+import datasets
 
 MAX_WAV_VALUE = 32767.0  # NOTE: 32768.0 -1 to prevent int16 overflow (results in popping sound in corner cases)
 
+class Collator:
+    def __init__(self, h, split=True):
+        self.h = h
+        self.split = split
 
+    def __call__(self, samples):
+        mel_batch = [] # x
+        audio_batch = [] # y
+        mel_loss_batch = [] # y_mel
+        
+        for item in samples:
+            audio, sample_rate = item["audio"]["array"], item["audio"]["sampling_rate"]
+            if sample_rate != self.h.sampling_rate:
+                audio = librosa.resample(
+                    audio,
+                    orig_sr = sample_rate,
+                    target_sr = self.h.sampling_rate,
+                    res_type = "scipy",
+                )
+                sample_rate = self.h.sampling_rate
+
+            if self.split:
+                random_chunk_upper_bound = max(0, audio.shape[0] - self.h.segment_size)
+                
+                if audio.shape[0] >= self.h.segment_size:
+                    audio_start = random.randint(0, random_chunk_upper_bound)
+                    audio = audio[audio_start : audio_start + self.h.segment_size]
+                else:
+                    audio = np.pad(
+                        audio,
+                        (0, self.h.segment_size - audio.shape[0]),
+                        mode="constant"
+                    )
+            else:
+                # Drop leftover samples
+                frame_len = audio.shape[-1] // self.h.hop_size # 32100 // 320
+                audio_len = int(frame_len * self.h.hop_size)
+                audio = audio[:audio_len]
+                
+            audio = librosa.util.normalize(audio) * 0.95
+            audio = torch.from_numpy(audio).float().unsqueeze(0) # [1, self.segment_size]
+            mel = mel_spectrogram(
+                audio,
+                self.h.n_fft,
+                self.h.num_mels,
+                self.h.sampling_rate,
+                self.h.hop_size,
+                self.h.win_size,
+                self.h.fmin,
+                self.h.fmax,
+                center=False,
+            )  # [B(1), self.num_mels, self.segment_size // self.hop_size]
+            mel_loss = mel_spectrogram(
+                audio,
+                self.h.n_fft,
+                self.h.num_mels,
+                self.h.sampling_rate,
+                self.h.hop_size,
+                self.h.win_size,
+                self.h.fmin,
+                self.h.fmax_loss,
+                center=False,
+            )  # [B(1), self.num_mels, self.segment_size // self.hop_size]
+            
+            aud_T = mel.shape[-1]
+            ori_T = mel_loss.shape[-1]
+            assert aud_T == ori_T, (aud_T, ori_T)
+            
+            mel_batch.append(mel)
+            audio_batch.append(audio)
+            mel_loss_batch.append(mel_loss)
+            
+        mel_batch = torch.cat(mel_batch, dim=0)
+        audio_batch = torch.cat(audio_batch, dim=0)
+        mel_loss_batch = torch.cat(mel_loss_batch, dim=0)
+        
+        return mel_batch, audio_batch, mel_loss_batch
+            
+            
+    
 def dynamic_range_compression(x, C=1, clip_val=1e-5):
     return np.log(np.clip(x, a_min=clip_val, a_max=None) * C)
 
@@ -394,3 +474,13 @@ class MelDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.audio_files)
+
+def get_dataset(dataset_name, rank=0, cache_dir=None):
+
+    dataset = datasets.load_dataset(
+        dataset_name,
+        cache_dir=cache_dir,
+        num_proc=16,
+    )["train"]
+    dataset = dataset.shuffle(seed=42 + rank)
+    return dataset

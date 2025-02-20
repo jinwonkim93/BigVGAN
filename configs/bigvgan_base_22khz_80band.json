@@ -33,13 +33,17 @@
 
     "fmin": 0,
     "fmax": 8000,
-    "fmax_for_loss": null,
-
+    "fmax_loss": null,
+    "cache_dir": "kss",
+    "dataset_name": "Bingsu/KSS_Dataset",
+    "project_name": "BigVGAN_KSS",
+    "experiment_name": "bigvgan_base_22khz_80band",
     "num_workers": 4,
+    "test_size": 512,
 
     "dist_config": {
         "dist_backend": "nccl",
-        "dist_url": "tcp://localhost:54321",
+        "dist_url": "tcp://localhost:60006",
         "world_size": 1
     }
 }
